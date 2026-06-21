@@ -1,0 +1,248 @@
+"""Config generator: turns a :class:`ScanResult` into a ready-to-run
+:class:`PackConfig`, then renders it to PyInstaller CLI args / ``.spec`` text or
+a Nuitka command line.
+
+Running PyInstaller via CLI args is the default execution path (no spec file to
+manage); the rendered ``.spec`` is provided for transparency / manual export.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import List, Optional
+
+from . import deps_db
+from .models import OutputMode, PackBackend, PackConfig, ScanResult
+
+
+def build_pack_config(
+    scan: ScanResult,
+    *,
+    entry_script: Optional[str] = None,
+    backend: PackBackend = PackBackend.PYINSTALLER,
+    output_mode: Optional[OutputMode] = None,
+    app_name: Optional[str] = None,
+    console: bool = True,
+    icon: Optional[str] = None,
+    bundle_all: bool = True,
+    compile_first: bool = False,
+    output_dir: str = "dist",
+    work_dir: str = "build",
+    include_data: bool = True,
+) -> PackConfig:
+    """Derive a fully-resolved :class:`PackConfig` from a scan result."""
+    root = Path(scan.root)
+
+    entry = entry_script
+    if entry is None:
+        best = scan.best_entry_point
+        entry = best.path if best else ""
+
+    name = app_name or (Path(entry).stem if entry else root.name)
+
+    hint = deps_db.aggregate(scan.third_party_imports)
+
+    # Default output mode: respect heavy-library advice unless overridden.
+    if output_mode is None:
+        output_mode = OutputMode.ONEDIR if hint.prefer_onedir else OutputMode.ONEFILE
+
+    cfg = PackConfig(
+        project_root=str(root),
+        entry_script=entry,
+        backend=backend,
+        output_mode=output_mode,
+        app_name=name,
+        console=console,
+        icon=icon,
+        bundle_all=bundle_all,
+        compile_first=compile_first,
+        output_dir=output_dir,
+        work_dir=work_dir,
+        python_executable=scan.env.python_executable,
+        hidden_imports=list(hint.hidden_imports),
+        excludes=list(hint.excludes),
+        collect_all=list(hint.collect_all),
+        collect_data=list(hint.collect_data),
+        collect_submodules=list(hint.collect_submodules),
+    )
+
+    # Dynamic imports become hidden-import candidates when they look like modules.
+    for dyn in scan.dynamic_imports:
+        token = dyn.name.strip()
+        if token and token.replace(".", "").replace("_", "").isalnum():
+            if token not in cfg.hidden_imports:
+                cfg.hidden_imports.append(token)
+
+    if include_data:
+        for data in scan.data_files:
+            if not data.selected:
+                continue
+            src = Path(data.path)
+            dest = _dest_dir(src, root)
+            if src.suffix.lower() in {".dll", ".so", ".dylib", ".pyd"}:
+                cfg.add_binary.append((str(src), dest))
+            else:
+                cfg.add_data.append((str(src), dest))
+
+    return cfg
+
+
+def _dest_dir(src: Path, root: Path) -> str:
+    try:
+        rel = src.relative_to(root)
+        parent = rel.parent.as_posix()
+    except ValueError:
+        parent = "."
+    return parent if parent and parent != "." else "."
+
+
+class PyInstallerGenerator:
+    """Render a :class:`PackConfig` for the PyInstaller backend."""
+
+    @staticmethod
+    def cli_args(cfg: PackConfig) -> List[str]:
+        args: List[str] = ["--noconfirm", "--name", cfg.app_name]
+        args.append("--onefile" if cfg.output_mode == OutputMode.ONEFILE else "--onedir")
+        args.append("--console" if cfg.console else "--windowed")
+        if cfg.clean:
+            args.append("--clean")
+        if not cfg.upx:
+            args.append("--noupx")
+        args += ["--distpath", cfg.output_dir, "--workpath", cfg.work_dir,
+                 "--specpath", cfg.work_dir]
+        if cfg.icon:
+            args += ["--icon", cfg.icon]
+
+        for src, dest in cfg.add_data:
+            args += ["--add-data", f"{src}{os.pathsep}{dest}"]
+        for src, dest in cfg.add_binary:
+            args += ["--add-binary", f"{src}{os.pathsep}{dest}"]
+        for name in cfg.hidden_imports:
+            args += ["--hidden-import", name]
+        for name in cfg.excludes:
+            args += ["--exclude-module", name]
+        for name in cfg.collect_all:
+            args += ["--collect-all", name]
+        for name in cfg.collect_data:
+            args += ["--collect-data", name]
+        for name in cfg.collect_submodules:
+            args += ["--collect-submodules", name]
+        args += cfg.extra_args
+        args.append(cfg.entry_script)
+        return args
+
+    @staticmethod
+    def spec_text(cfg: PackConfig) -> str:
+        datas = [(s, d) for s, d in cfg.add_data]
+        binaries = [(s, d) for s, d in cfg.add_binary]
+        onefile = cfg.output_mode == OutputMode.ONEFILE
+
+        lines: List[str] = [
+            "# -*- mode: python ; coding: utf-8 -*-",
+            "# Auto-generated by PySmartPack (editable).",
+            "from PyInstaller.utils.hooks import (",
+            "    collect_all, collect_data_files, collect_submodules,",
+            ")",
+            "",
+            f"datas = {datas!r}",
+            f"binaries = {binaries!r}",
+            f"hiddenimports = {cfg.hidden_imports!r}",
+            "",
+        ]
+        for pkg in cfg.collect_all:
+            lines.append(f"_d, _b, _h = collect_all({pkg!r})")
+            lines.append("datas += _d; binaries += _b; hiddenimports += _h")
+        for pkg in cfg.collect_data:
+            lines.append(f"datas += collect_data_files({pkg!r})")
+        for pkg in cfg.collect_submodules:
+            lines.append(f"hiddenimports += collect_submodules({pkg!r})")
+        lines += [
+            "",
+            "a = Analysis(",
+            f"    [{cfg.entry_script!r}],",
+            f"    pathex=[{cfg.project_root!r}],",
+            "    binaries=binaries,",
+            "    datas=datas,",
+            "    hiddenimports=hiddenimports,",
+            "    hookspath=[],",
+            f"    excludes={cfg.excludes!r},",
+            "    noarchive=False,",
+            ")",
+            "pyz = PYZ(a.pure)",
+            "",
+        ]
+        console = cfg.console
+        if onefile:
+            lines += [
+                "exe = EXE(",
+                "    pyz, a.scripts, a.binaries, a.datas, [],",
+                f"    name={cfg.app_name!r},",
+                "    debug=False, bootloader_ignore_signals=False, strip=False,",
+                f"    upx={cfg.upx}, console={console},",
+                f"    icon={cfg.icon!r}," if cfg.icon else "    icon=None,",
+                ")",
+            ]
+        else:
+            lines += [
+                "exe = EXE(",
+                "    pyz, a.scripts, [],",
+                "    exclude_binaries=True,",
+                f"    name={cfg.app_name!r},",
+                "    debug=False, bootloader_ignore_signals=False, strip=False,",
+                f"    upx={cfg.upx}, console={console},",
+                f"    icon={cfg.icon!r}," if cfg.icon else "    icon=None,",
+                ")",
+                "coll = COLLECT(",
+                f"    exe, a.binaries, a.datas, strip=False, upx={cfg.upx},",
+                f"    name={cfg.app_name!r},",
+                ")",
+            ]
+        return "\n".join(lines) + "\n"
+
+
+class NuitkaGenerator:
+    """Render a :class:`PackConfig` for the Nuitka backend."""
+
+    @staticmethod
+    def cli_args(cfg: PackConfig) -> List[str]:
+        args: List[str] = ["--assume-yes-for-downloads"]
+        if cfg.output_mode == OutputMode.ONEFILE:
+            args.append("--onefile")
+        else:
+            args.append("--standalone")
+        if not cfg.console:
+            # Windows-specific; harmless elsewhere because Nuitka ignores unknown
+            # console mode on other platforms.
+            args.append("--windows-console-mode=disable")
+        args += [f"--output-dir={cfg.output_dir}", f"--output-filename={cfg.app_name}"]
+        if cfg.icon and cfg.icon.lower().endswith(".ico"):
+            args.append(f"--windows-icon-from-ico={cfg.icon}")
+
+        for pkg in cfg.collect_all + cfg.collect_data:
+            args.append(f"--include-package-data={pkg}")
+        for pkg in cfg.collect_submodules + cfg.collect_all:
+            args.append(f"--include-package={pkg}")
+        for mod in cfg.hidden_imports:
+            args.append(f"--include-module={mod}")
+        for src, dest in cfg.add_data:
+            args.append(f"--include-data-files={src}={_nuitka_dest(src, dest)}")
+        args += cfg.extra_args
+        args.append(cfg.entry_script)
+        return args
+
+
+def _nuitka_dest(src: str, dest: str) -> str:
+    name = Path(src).name
+    if dest in ("", "."):
+        return name
+    return f"{dest}/{name}"
+
+
+def render(cfg: PackConfig) -> dict:
+    """Render both CLI args and (for PyInstaller) spec text for previewing."""
+    if cfg.backend == PackBackend.NUITKA:
+        return {"args": NuitkaGenerator.cli_args(cfg), "spec": ""}
+    return {
+        "args": PyInstallerGenerator.cli_args(cfg),
+        "spec": PyInstallerGenerator.spec_text(cfg),
+    }

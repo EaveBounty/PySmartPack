@@ -1,0 +1,80 @@
+name: build
+
+# Builds a portable, dependency-free PySmartPack bundle for Windows, macOS and
+# Linux. Pushing a tag like `v0.1.0` also publishes a GitHub Release with the
+# per-platform zips attached.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.suffix }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            suffix: windows
+          - os: macos-latest
+            suffix: macos
+          - os: ubuntu-latest
+            suffix: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # PySide6 needs a few system libraries to be importable on headless Linux.
+      - name: Install Linux Qt runtime libs
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libxcb-cursor0 \
+            libdbus-1-3 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Build portable bundle
+        run: python scripts/build_app.py
+
+      - name: Rename artifact
+        shell: bash
+        run: mv dist/PySmartPack_portable.zip "dist/PySmartPack-${{ matrix.suffix }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PySmartPack-${{ matrix.suffix }}
+          path: dist/PySmartPack-${{ matrix.suffix }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          generate_release_notes: true

@@ -1,0 +1,12 @@
+# PySmartPack runtime dependencies (core / Milestone 1)
+# Install:  python -m pip install -r requirements.txt
+PySide6>=6.6
+PySide6-Fluent-Widgets>=1.5
+PyInstaller>=6.0
+packaging>=23.0
+tomli>=2.0 ; python_version < "3.11"
+
+# --- Optional (install only if needed) ---
+# Nuitka backend:      pip install nuitka
+# LLM advisor:         pip install openai anthropic httpx
+# Dev / tests:         pip install pytest pytest-qt ruff
