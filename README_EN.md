@@ -1,7 +1,10 @@
-<!-- LANG-SWITCH --> [中文](./README.md) · **English**
-<!-- DOCS --> 📖 [DESIGN spec (English)](./DESIGN_EN.md) · [中文 README](./README.md)
+
 
 # PySmartPack · Smart Python Packager
+
+ [中文](./README.md) · **English**
+
+ 📖 [DESIGN spec (English)](./DESIGN_EN.md) 
 
 > A **thinking, modern front-end** for PyInstaller / Nuitka.
 > Point it at a Python folder → it auto-detects structure / environment / dependencies / data → one-click build into an executable.
