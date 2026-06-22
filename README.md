@@ -1,7 +1,11 @@
-<!-- LANG-SWITCH --> **中文** · [English](./README_EN.md)
-<!-- DOCS --> 📖 [设计规范 DESIGN.md](./DESIGN.md) · [English README](./README_EN.md)
+
 
 # PySmartPack · 智能 Python 打包器
+
+ **中文** · [English](./README_EN.md)
+
+📖 [设计规范 DESIGN.md](./DESIGN.md)
+
 
 > 给 PyInstaller / Nuitka 装一个**会思考的现代化前端**。
 > 选中一个 Python 目录 → 自动识别结构 / 环境 / 依赖 / 数据 → 一键打包成可执行文件。
